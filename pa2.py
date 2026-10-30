@@ -1,6 +1,7 @@
 # Name: Jabir Rahman
 # Student ID: 101374024 (Carleton)
 
+import yaml
 import sys
 import json
 import xml.etree.ElementTree as ET
@@ -35,8 +36,14 @@ class Device:
 def main():
     """Read the inventory file, count roles and interfaces, and write audit.json."""
     inventory_file = sys.argv[1]
+    policy_file = sys.argv[2]
     tree = ET.parse(inventory_file)
     root = tree.getroot()
+    with open(policy_file) as f:
+        policy = yaml.safe_load(f)
+
+    if policy is None:
+        policy = {}
 
     skipped = 0
     devices = []
@@ -78,6 +85,7 @@ def main():
         json.dump(report, f, indent=2)
 
     print("Audited", len(devices), "devices, skipped", skipped)
-
+    print("Policy:", policy)
+    
 if __name__ == "__main__":
     main()
