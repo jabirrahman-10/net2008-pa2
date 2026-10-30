@@ -5,6 +5,32 @@ import sys
 import json
 import xml.etree.ElementTree as ET
 
+class Device:
+    """One network device from the inventory file."""
+
+    def __init__(self, element):
+        """Read the id, role, os, owner and interface statuses from an XML element."""
+        self.id = element.get("id")
+        self.role = element.get("role")
+        self.os = element.get("os")
+
+        owner = element.find("owner")
+        if owner is None or owner.text is None:
+            self.owner = ""
+        else:
+            self.owner = owner.text.strip()
+
+        self.statuses = []
+        for interface in element.findall("interface"):
+            self.statuses.append(interface.get("status"))
+
+    def count_status(self, wanted):
+        """Return how many interfaces have the status 'up' or 'down'."""
+        count = 0
+        for status in self.statuses:
+            if status == wanted:
+                count += 1
+        return count
 
 def main():
     """Read the inventory file, count roles and interfaces, and write audit.json."""
@@ -13,32 +39,34 @@ def main():
     root = tree.getroot()
 
     skipped = 0
-    kept_ids = []
-    roles = {}
-    interfaces = {"up": 0, "down": 0, "other": 0}
-    for device in root.findall("device"):
-        if device.get("id") is None:
+    devices = []
+    for element in root.findall("device"):
+        if element.get("id") is None:
             skipped += 1
         else:
-            kept_ids.append(device.get("id"))
-            role = device.get("role")
-            if role in roles:
-                roles[role] += 1
-            else:
-                roles[role] = 1
+            devices.append(Device(element))
 
-            for interface in device.findall("interface"):
-                status = interface.get("status")
-                if status == "up":
-                    interfaces["up"] += 1
-                elif status == "down":
-                    interfaces["down"] += 1
-                else:
-                    interfaces["other"] += 1
+    roles = {}
+    interfaces = {"up": 0, "down": 0, "other": 0}
+    for device in devices:
+        if device.role in roles:
+            roles[device.role] += 1
+        else:
+            roles[device.role] = 1
+
+        up = device.count_status("up")
+        down = device.count_status("down")
+        interfaces["up"] += up
+        interfaces["down"] += down
+        interfaces["other"] += len(device.statuses) - up - down
+
+    kept_ids = []
+    for device in devices:
+        kept_ids.append(device.id)
 
     report = {
         "site": root.get("site"),
-        "total_devices": len(kept_ids),
+        "total_devices": len(devices),
         "skipped_devices": skipped,
         "roles": roles,
         "interfaces": interfaces,
@@ -49,8 +77,7 @@ def main():
     with open("audit.json", "w") as f:
         json.dump(report, f, indent=2)
 
-    print("Audited", len(kept_ids), "devices, skipped", skipped)
-
+    print("Audited", len(devices), "devices, skipped", skipped)
 
 if __name__ == "__main__":
     main()
