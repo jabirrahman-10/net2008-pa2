@@ -7,6 +7,10 @@ import yaml
 import xml.etree.ElementTree as ET
 
 
+class InputError(Exception):
+    """Raised when an input file is missing or invalid."""
+
+
 class Device:
     """One network device from the inventory file."""
 
@@ -35,16 +39,61 @@ class Device:
         return count
 
 
-def main():
-    """Read both files, check the policy, and write audit.json."""
-    inventory_file = sys.argv[1]
-    policy_file = sys.argv[2]
-    root = ET.parse(inventory_file).getroot()
+def version_parts(text):
+    """Turn a version like '15.10' into a list of numbers [15, 10]."""
+    parts = []
+    for piece in str(text).split("."):
+        parts.append(int(piece))
+    return parts
 
-    with open(policy_file) as f:
-        policy = yaml.safe_load(f)
+
+def is_older(found, required):
+    """Return True if version 'found' is lower than version 'required'."""
+    a = version_parts(found)
+    b = version_parts(required)
+    # pad the shorter list with zeros so 9.1.0 equals 9.1
+    while len(a) < len(b):
+        a.append(0)
+    while len(b) < len(a):
+        b.append(0)
+    return a < b
+
+
+def load_inventory(path):
+    """Read the XML file and return its root element."""
+    try:
+        return ET.parse(path).getroot()
+    except FileNotFoundError:
+        raise InputError(path + ": file not found")
+    except ET.ParseError:
+        raise InputError(path + ": not valid XML")
+    except OSError:
+        raise InputError(path + ": cannot be read")
+
+
+def load_policy(path):
+    """Read the YAML file and return the policy as a dictionary."""
+    try:
+        with open(path) as f:
+            policy = yaml.safe_load(f)
+    except FileNotFoundError:
+        raise InputError(path + ": file not found")
+    except yaml.YAMLError:
+        raise InputError(path + ": not valid YAML")
+    except OSError:
+        raise InputError(path + ": cannot be read")
+
     if policy is None:
         policy = {}
+    if not isinstance(policy, dict):
+        raise InputError(path + ": policy must be a mapping")
+    return policy
+
+
+def run(inventory_file, policy_file):
+    """Read both files, check the policy, and write audit.json."""
+    root = load_inventory(inventory_file)
+    policy = load_policy(policy_file)
 
     skipped = 0
     devices = []
@@ -68,14 +117,33 @@ def main():
         interfaces["down"] += down
         interfaces["other"] += len(device.statuses) - up - down
 
+    min_os = policy.get("min_os")
     violations = []
     for device in devices:
-        # unknown_role: role is not a key of min_os
-        if "min_os" in policy:
-            if device.role not in policy["min_os"]:
-                violations.append(
-                    {"device": device.id, "type": "unknown_role", "role": device.role}
-                )
+        known_role = True
+
+        # unknown_role: role is not a key of min_os (no OS check then)
+        if isinstance(min_os, dict) and device.role not in min_os:
+            known_role = False
+            violations.append(
+                {"device": device.id, "type": "unknown_role", "role": device.role}
+            )
+
+        # os_outdated: version lower than the minimum for its role
+        if isinstance(min_os, dict) and known_role:
+            required = str(min_os[device.role])
+            try:
+                if is_older(device.os, required):
+                    violations.append(
+                        {
+                            "device": device.id,
+                            "type": "os_outdated",
+                            "found": device.os,
+                            "required": required,
+                        }
+                    )
+            except ValueError:
+                raise InputError("bad version number for device " + device.id)
 
         # missing_owner: owner required but empty
         if policy.get("require_owner") is True and device.owner == "":
@@ -113,6 +181,20 @@ def main():
 
     print("Audited", len(devices), "devices, skipped", skipped)
     print("Violations found:", len(violations))
+
+
+def main():
+    """Check the arguments, run the audit, and handle errors."""
+    if len(sys.argv) != 3:
+        print("usage: python pa2.py DEVICES.xml POLICY.yaml")
+        sys.exit(2)
+
+    try:
+        run(sys.argv[1], sys.argv[2])
+    except InputError as error:
+        print("Error:", error)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
